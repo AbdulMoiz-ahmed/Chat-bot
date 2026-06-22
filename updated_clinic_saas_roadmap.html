@@ -1,0 +1,211 @@
+
+<style>
+  .rm { padding: 1.5rem 0; }
+  .phase-header { display:flex; align-items:center; gap:10px; margin-bottom:10px; cursor:pointer; user-select:none; }
+  .phase-pill { font-size:11px; font-weight:500; padding:3px 10px; border-radius:20px; white-space:nowrap; }
+  .phase-title { font-size:15px; font-weight:500; color:var(--color-text-primary); }
+  .phase-dur { font-size:12px; color:var(--color-text-secondary); margin-left:auto; white-space:nowrap; }
+  .phase-body { padding:0 0 0 18px; border-left:1.5px solid var(--color-border-tertiary); margin-left:9px; margin-bottom:8px; }
+  .task-row { display:flex; align-items:flex-start; gap:8px; padding:7px 0; border-bottom:0.5px solid var(--color-border-tertiary); }
+  .task-row:last-child { border-bottom:none; }
+  .task-dot { width:7px; height:7px; border-radius:50%; margin-top:5px; flex-shrink:0; }
+  .task-text { color:var(--color-text-primary); line-height:1.55; flex:1; font-size:13px; }
+  .tag { font-size:11px; padding:2px 7px; border-radius:10px; white-space:nowrap; flex-shrink:0; margin-top:2px; }
+  .milestone { display:flex; align-items:center; gap:8px; background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:8px 12px; margin-top:8px; font-size:12px; color:var(--color-text-secondary); }
+  .risk-box { background:var(--color-background-warning); border:0.5px solid var(--color-border-warning); border-radius:var(--border-radius-md); padding:8px 12px; margin-top:6px; font-size:12px; color:var(--color-text-warning); }
+  .new-box { background:var(--color-background-success); border:0.5px solid var(--color-border-success); border-radius:var(--border-radius-md); padding:8px 12px; margin-top:6px; font-size:12px; color:var(--color-text-success); }
+  .stack-row { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .chip { font-size:11px; padding:3px 9px; border-radius:12px; border:0.5px solid var(--color-border-secondary); color:var(--color-text-secondary); background:var(--color-background-primary); }
+  .chevron { transition:transform .2s; display:inline-block; font-size:11px; color:var(--color-text-secondary); }
+  .chevron.open { transform:rotate(90deg); }
+  .nav { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:16px; }
+  .nb { font-size:12px; padding:4px 12px; border-radius:20px; border:0.5px solid var(--color-border-secondary); background:transparent; color:var(--color-text-secondary); cursor:pointer; }
+  .nb.active { background:var(--color-background-secondary); color:var(--color-text-primary); border-color:var(--color-border-primary); }
+  .new-badge { font-size:10px; padding:1px 6px; border-radius:8px; background:var(--color-background-success); color:var(--color-text-success); border:0.5px solid var(--color-border-success); margin-left:4px; vertical-align:middle; }
+</style>
+
+<div class="rm">
+  <h2 class="sr-only">Updated WhatsApp clinic SaaS roadmap — 6 phases including multi-tenancy, number management, access control, and billing</h2>
+
+  <div class="nav">
+    <button class="nb active" onclick="filter('all',this)">All phases</button>
+    <button class="nb" onclick="filter('backend',this)">Backend</button>
+    <button class="nb" onclick="filter('whatsapp',this)">WhatsApp</button>
+    <button class="nb" onclick="filter('dashboard',this)">Dashboard</button>
+    <button class="nb" onclick="filter('saas',this)">SaaS / billing</button>
+    <button class="nb" onclick="filter('ai',this)">AI / NLP</button>
+  </div>
+
+  <div id="phases"></div>
+</div>
+
+<script>
+const phases = [
+  {
+    id:'p1', label:'Phase 1', dur:'Week 1–2',
+    title:'Foundation, multi-tenant DB & webhook',
+    color:'#534AB7', bg:'#EEEDFE', tc:'#3C3489', dot:'#7F77DD',
+    tags:['backend','whatsapp'],
+    isNew: false,
+    milestone:'✓ Bot echoes messages; DB is multi-tenant from day one',
+    tasks:[
+      { text:'Design DB schema with clinic_id on every table from the very start: Clinics, Doctors, Patients, TimeSlots, Appointments, Users, Roles — never retrofit this later', tags:['backend'], isNew:true },
+      { text:'Add wa_phone_number_id column to Clinics table — this is how all incoming webhooks get routed to the right clinic', tags:['backend','whatsapp'], isNew:true },
+      { text:'Store your single Meta Access Token and WABA ID as server environment variables only — never in the DB', tags:['backend','whatsapp'], isNew:true },
+      { text:'Set up Meta Developer account, create a WhatsApp Business Account (WABA), expose one webhook URL that receives messages for ALL clinic numbers', tags:['whatsapp'] },
+      { text:'Spin up FastAPI server with HTTPS on a VPS (Hetzner / DigitalOcean) — Meta requires HTTPS for webhooks', tags:['backend'] },
+      { text:'Build webhook router: extract phone_number_id from each payload → query DB → find clinic → route to that clinic\'s booking flow', tags:['backend','whatsapp'], isNew:true },
+      { text:'Set up PostgreSQL with proper indexing on clinic_id + appointment_date columns from day one', tags:['backend'] },
+      { text:'Echo bot test: add a test clinic row, assign a test number, confirm full round-trip works', tags:['whatsapp'] },
+    ],
+    stack:['Python','FastAPI','PostgreSQL','WhatsApp Cloud API','Redis','ngrok (dev)'],
+    risk: null,
+    newNote: 'Multi-tenancy and phone_number_id routing added — these must be built first, not retrofitted.'
+  },
+  {
+    id:'p2', label:'Phase 2', dur:'Week 3–5',
+    title:'Core booking flow + number onboarding',
+    color:'#0F6E56', bg:'#E1F5EE', tc:'#085041', dot:'#1D9E75',
+    tags:['backend','whatsapp'],
+    isNew: false,
+    milestone:'✓ Patient books via WhatsApp buttons; you can onboard a new clinic number in 10 minutes',
+    tasks:[
+      { text:'Build clinic number onboarding flow: admin panel lets you enter a phone number, triggers Meta OTP verification, stores the returned phone_number_id against the clinic — entire process takes ~10 mins', tags:['backend','whatsapp'], isNew:true },
+      { text:'Handle both number scenarios: clinic uses existing number (they disconnect WhatsApp app first, you verify via OTP) or new SIM (cleaner, recommended)', tags:['whatsapp'], isNew:true },
+      { text:'Build state machine in Redis keyed by wa_phone_number + patient_wa_number — sessions are per-clinic, never shared', tags:['backend'] },
+      { text:'Interactive list messages: patient taps doctor → date → time slot — no typing required', tags:['whatsapp'] },
+      { text:'Write booking to Appointments table with clinic_id; mark slot unavailable scoped to that clinic only', tags:['backend'] },
+      { text:'Send structured confirmation message back via the clinic\'s phone_number_id', tags:['whatsapp'] },
+      { text:'Cancel/reschedule flow; automated 24hr reminder with one-tap Confirm / Reschedule button', tags:['backend','whatsapp'] },
+      { text:'Clinic hours, location, and bot language stored per clinic in DB — each clinic\'s bot is independently configurable', tags:['backend'], isNew:true },
+    ],
+    stack:['Redis','WhatsApp Interactive Lists','APScheduler','SQLAlchemy','Meta Cloud API'],
+    risk:'Do not touch NLP yet. Get every button-based happy path writing cleanly to the DB first. Verify the routing logic handles two clinics simultaneously before moving on.',
+    newNote:'Number onboarding flow and per-clinic configuration added.'
+  },
+  {
+    id:'p3', label:'Phase 3', dur:'Week 6–8',
+    title:'Access control — 3 user roles',
+    color:'#993C1D', bg:'#FAECE7', tc:'#712B13', dot:'#D85A30',
+    tags:['backend','dashboard','saas'],
+    isNew: true,
+    milestone:'✓ Super admin, clinic admin, and clinic staff can each log in with correct permissions',
+    tasks:[
+      { text:'Build auth system: JWT-based login, roles table with super_admin / clinic_admin / clinic_staff — clinic_id is null for super admin, scoped for all others', tags:['backend','saas'] },
+      { text:'Super admin panel (your private ops view): see all clinics, their plan, usage, billing status, WhatsApp number health, NLP failure logs across all tenants', tags:['dashboard','saas'] },
+      { text:'Clinic admin view: scoped entirely to their clinic_id — doctors, appointments, patients, bot config, their WhatsApp number status', tags:['dashboard'] },
+      { text:'Clinic staff view: appointment inbox and omnichannel WhatsApp inbox only — no billing, no doctor management, no config changes', tags:['dashboard'] },
+      { text:'All API routes enforce clinic_id scoping server-side — a clinic admin cannot query another clinic\'s data even with a valid token', tags:['backend','saas'] },
+      { text:'Manual clinic creation flow in super admin panel: create clinic → assign phone number → invite clinic admin via email link', tags:['dashboard','saas'] },
+      { text:'Omnichannel inbox: staff can read patient WhatsApp threads and send manual replies, routed through the correct phone_number_id', tags:['dashboard','whatsapp'] },
+    ],
+    stack:['NextAuth / JWT','Next.js','Tailwind CSS','Supabase Realtime','shadcn/ui'],
+    risk:null,
+    newNote:'Entirely new phase. 3-tier role system (you / clinic admin / clinic staff) is essential for SaaS — built before billing.'
+  },
+  {
+    id:'p4', label:'Phase 4', dur:'Week 9–11',
+    title:'Admin dashboard + real-time calendar',
+    color:'#185FA5', bg:'#E6F1FB', tc:'#0C447C', dot:'#378ADD',
+    tags:['dashboard','backend'],
+    isNew: false,
+    milestone:'✓ Clinic staff can see and manage all appointments in real time across all doctors',
+    tasks:[
+      { text:'Calendar view: each doctor\'s day as a slot grid — booked, free, and blocked slots colour-coded, all scoped to clinic_id', tags:['dashboard'] },
+      { text:'Real-time sync via Supabase subscriptions — when a patient books on WhatsApp the slot closes instantly in the dashboard', tags:['dashboard','backend'] },
+      { text:'Patient table: search and filter by doctor/date, click through to view full conversation history (scoped to clinic)', tags:['dashboard'] },
+      { text:'Doctor management: add/edit doctors, set available hours, block holidays — changes reflect in the WhatsApp booking flow immediately', tags:['dashboard','backend'] },
+      { text:'No-show tracker: auto-mark appointments if patient never confirmed; daily digest report emailed to clinic admin', tags:['dashboard','backend'] },
+      { text:'WhatsApp number status widget in the dashboard: shows if the clinic\'s number is active, any delivery errors, and daily message count', tags:['dashboard','whatsapp'], isNew:true },
+      { text:'NLP failure queue visible to clinic staff: they can see messages the bot could not parse and manually handle them', tags:['dashboard'] },
+    ],
+    stack:['Next.js','Supabase Realtime','Recharts','Resend / SendGrid','shadcn/ui'],
+    risk:null,
+    newNote:'WhatsApp number health widget added so clinic staff can self-diagnose delivery issues without contacting you.'
+  },
+  {
+    id:'p5', label:'Phase 5', dur:'Week 12–13',
+    title:'Billing — Stripe subscriptions',
+    color:'#854F0B', bg:'#FAEEDA', tc:'#633806', dot:'#EF9F27',
+    tags:['saas','backend'],
+    isNew: true,
+    milestone:'✓ First clinic pays monthly; account auto-suspends on non-payment without any manual action from you',
+    tasks:[
+      { text:'Integrate Stripe: each clinic gets a Stripe customer + subscription on signup — you never manually track payments', tags:['saas','backend'] },
+      { text:'Plan tiers enforced in DB: Basic (1 doctor, 200 appts/month), Pro (5 doctors, unlimited), Clinic+ (custom) — limits checked on every booking attempt', tags:['saas','backend'] },
+      { text:'Stripe webhooks: payment_succeeded → activate account, payment_failed → grace period email, subscription_cancelled → suspend bot and show "subscription paused" in dashboard', tags:['saas','backend'] },
+      { text:'Billing page in clinic admin dashboard: current plan, usage this month, invoice history, upgrade/downgrade buttons — all via Stripe Customer Portal', tags:['saas','dashboard'] },
+      { text:'Usage metering: track appointments per clinic per month in DB — surface usage bar in dashboard and send email warning at 80% of plan limit', tags:['saas','backend'] },
+      { text:'On clinic cancellation: disconnect their phone_number_id from your Meta account, export their data as CSV, delete from your DB — clear offboarding so they keep their number', tags:['saas','whatsapp'], isNew:true },
+    ],
+    stack:['Stripe','Stripe Customer Portal','Stripe Webhooks','Celery','PostgreSQL'],
+    risk:'Integrate Stripe before charging a single clinic — chasing payments manually does not scale past 5 customers.',
+    newNote:'Entirely new phase. Includes clean offboarding flow so clinics can reclaim their WhatsApp number if they cancel.'
+  },
+  {
+    id:'p6', label:'Phase 6', dur:'Week 14–16',
+    title:'NLP / AI layer + hardening + launch',
+    color:'#993556', bg:'#FBEAF0', tc:'#72243E', dot:'#D4537E',
+    tags:['ai','backend','whatsapp'],
+    isNew: false,
+    milestone:'✓ First paying clinic live with Roman Urdu NLP, monitoring, and verified Meta Business Account',
+    tasks:[
+      { text:'Apply for Meta Business Verification NOW (start this in Phase 3) — can take 1–2 weeks; unlocks higher message limits for all clinic numbers under your account', tags:['whatsapp'], isNew:true },
+      { text:'Set up Ollama with llama3 / mistral: intent extractor takes raw patient message, returns JSON {intent, date, time, doctor_name} — only called for free-text, not button responses', tags:['ai','backend'] },
+      { text:'Graceful fallback: if NLP confidence is low or JSON parse fails, bot replies with structured button menu in Roman Urdu + English — never leave patient in silence', tags:['ai','whatsapp'] },
+      { text:'Test with real inputs: "kal shaam 5 baje ka time chahye", "dr ahmed se milna hai", "appointment cancel karo"', tags:['ai'] },
+      { text:'Stress-test multi-tenant routing: simulate 20 clinics with concurrent patient conversations — verify sessions never bleed across clinic_id boundaries', tags:['backend'], isNew:true },
+      { text:'Rate limiting + abuse detection per phone number; encrypt patient data at rest; secrets manager for Meta token', tags:['backend'] },
+      { text:'Monitoring: Sentry for errors, uptime alerts, daily digest of bookings/cancellations/no-shows per clinic emailed to you as super admin', tags:['backend','dashboard'] },
+      { text:'Pilot onboarding: manually onboard 1 clinic, shadow their first week, collect feedback before opening to more', tags:['saas'] },
+    ],
+    stack:['Ollama','Llama 3','Celery async queue','Sentry','Docker + Compose','GitHub Actions CI'],
+    risk:'Budget extra time for Roman Urdu NLP — the fallback path is not optional. Also: start Meta Business Verification in Phase 3, not here.',
+    newNote:'Meta Business Verification and multi-tenant stress testing added.'
+  },
+];
+
+function filter(tag, btn) {
+  document.querySelectorAll('.nb').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.phase-block').forEach(el => {
+    const tags = el.dataset.tags.split(',');
+    el.style.display = (tag === 'all' || tags.includes(tag)) ? '' : 'none';
+  });
+}
+
+function toggle(id) {
+  const body = document.getElementById('b-'+id);
+  const ch = document.getElementById('c-'+id);
+  const open = body.style.display !== 'none';
+  body.style.display = open ? 'none' : '';
+  ch.classList.toggle('open', !open);
+}
+
+function render() {
+  document.getElementById('phases').innerHTML = phases.map(p => `
+    <div class="phase-block" data-tags="${p.tags.join(',')}" style="margin-bottom:16px">
+      <div class="phase-header" onclick="toggle('${p.id}')">
+        <span class="chevron open" id="c-${p.id}">▶</span>
+        <span class="phase-pill" style="background:${p.bg};color:${p.tc}">${p.label}</span>
+        <span class="phase-title">${p.title}${p.isNew ? '<span class="new-badge">new</span>' : ''}</span>
+        <span class="phase-dur">${p.dur}</span>
+      </div>
+      <div class="phase-body" id="b-${p.id}">
+        ${p.newNote ? `<div class="new-box" style="margin-bottom:8px"><i class="ti ti-sparkles" aria-hidden="true"></i> ${p.newNote}</div>` : ''}
+        ${p.tasks.map(t => `
+          <div class="task-row">
+            <div class="task-dot" style="background:${p.dot}"></div>
+            <div class="task-text">${t.text}${t.isNew ? ' <span class="new-badge">updated</span>' : ''}</div>
+          </div>
+        `).join('')}
+        <div class="stack-row">${p.stack.map(s => `<span class="chip">${s}</span>`).join('')}</div>
+        ${p.risk ? `<div class="risk-box"><strong>Watch out:</strong> ${p.risk}</div>` : ''}
+        <div class="milestone">${p.milestone}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+render();
+</script>
