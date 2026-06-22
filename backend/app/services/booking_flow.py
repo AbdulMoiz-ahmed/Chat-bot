@@ -1,0 +1,695 @@
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, Any, Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update
+from app.models.patient import Patient
+from app.models.doctor import Doctor
+from app.models.timeslot import TimeSlot
+from app.models.appointment import Appointment
+from app.services.session_service import SessionService
+from app.services.whatsapp_service import WhatsAppService
+from app.services.scheduler_service import SchedulerService
+
+logger = logging.getLogger("booking_flow")
+logger.setLevel(logging.INFO)
+
+class BookingFlow:
+    @classmethod
+    async def handle_message(
+        cls,
+        phone_number: str,
+        sender_name: str,
+        msg_type: str,
+        text_or_payload: str,
+        db: AsyncSession,
+        clinic_id: int = None
+    ) -> None:
+        """
+        Main entry point for incoming WhatsApp messages (text, list reply, button reply).
+        Evaluates the current state machine step and dispatches to appropriate handlers.
+        """
+        phone = phone_number.replace("+", "")
+        session = await SessionService.get_session(phone, clinic_id)
+        step = session.get("step", "idle")
+        data = session.get("data", {})
+        
+        normalized_text = text_or_payload.strip().lower()
+        
+        # Global commands that reset state
+        if normalized_text in ("cancel", "quit", "exit") and step != "confirm":
+            await cls._send_text(phone, "Session reset. Type 'book' to schedule an appointment or 'bookings' to manage upcoming ones.")
+            await SessionService.clear_session(phone, clinic_id)
+            return
+
+        # Handle button clicks from reminders (bypasses standard state machine steps)
+        if msg_type == "interactive" and text_or_payload.startswith("btn_rem_"):
+            await cls._handle_reminder_action(phone, text_or_payload, db, clinic_id)
+            return
+
+        if step == "idle" and msg_type == "text":
+            # Pass free text to LLM Intent Extractor
+            from app.services.llm_extractor import LLMExtractor
+            from app.models.nlp_log import NlpLog
+            try:
+                intent_data = await LLMExtractor.extract_intent(text_or_payload)
+                intent = intent_data.get("intent")
+                
+                if intent == "book_appointment":
+                    await cls._start_booking_flow(phone, db, clinic_id)
+                    return
+                elif intent in ("cancel_appointment", "reschedule"):
+                    await cls._start_manage_flow(phone, db, clinic_id)
+                    return
+                elif intent == "get_info":
+                    await cls._send_text(phone, "Our clinic hours are 9 AM to 9 PM. Please type 'book' to schedule an appointment.")
+                    return
+                elif intent == "greeting":
+                    await cls._send_greeting_menu(phone, sender_name)
+                    return
+                else:
+                    raise ValueError("Unknown intent")
+            except Exception as e:
+                # Log failure
+                logger.error(f"NLP parsing failed: {e}")
+                log_entry = NlpLog(
+                    clinic_id=clinic_id,
+                    patient_phone=phone,
+                    raw_message=text_or_payload,
+                    error_reason=str(e)
+                )
+                db.add(log_entry)
+                await db.commit()
+                
+                await cls._send_fallback_menu(phone)
+                return
+
+        if step == "idle" and msg_type == "interactive":
+            if text_or_payload == "btn_book":
+                await cls._start_booking_flow(phone, db, clinic_id)
+                return
+            elif text_or_payload == "btn_manage":
+                await cls._start_manage_flow(phone, db, clinic_id)
+                return
+
+
+        # Handle button clicks from reminders (bypasses standard state machine steps)
+        if msg_type == "interactive" and text_or_payload.startswith("btn_rem_"):
+            await cls._handle_reminder_action(phone, text_or_payload, db, clinic_id)
+            return
+
+        # Dispatch based on current session step
+        if step == "select_doctor":
+            await cls._handle_select_doctor(phone, msg_type, text_or_payload, session, db, clinic_id)
+        elif step == "select_date":
+            await cls._handle_select_date(phone, msg_type, text_or_payload, session, db, clinic_id)
+        elif step == "select_slot":
+            await cls._handle_select_slot(phone, msg_type, text_or_payload, session, db, clinic_id)
+        elif step == "confirm":
+            await cls._handle_confirm_booking(phone, sender_name, msg_type, text_or_payload, session, db, clinic_id)
+        elif step == "select_appointment_action":
+            await cls._handle_select_appointment_action(phone, msg_type, text_or_payload, session, db, clinic_id)
+        elif step == "confirm_appointment_action":
+            await cls._handle_confirm_appointment_action(phone, msg_type, text_or_payload, session, db, clinic_id)
+        else:
+            # Idle/unrecognized inputs
+            welcome_msg = (
+                f"Hello {sender_name}! I am your Virtual Clinic Assistant.\n\n"
+                f"• Type *'book'* to schedule a new appointment.\n"
+                f"• Type *'bookings'* to view or cancel upcoming appointments."
+            )
+            await cls._send_text(phone, welcome_msg)
+
+    # --- FLOW INITIATORS ---
+    
+    @classmethod
+    async def _send_fallback_menu(cls, phone: str) -> None:
+        """Sends a bilingual fallback menu when AI fails to parse intent."""
+        msg = "We couldn't understand your message.\nHum aapka message samajh nahi paye.\n\nPlease select an option below:"
+        buttons = [
+            {"id": "btn_book", "title": "Book Appointment"},
+            {"id": "btn_manage", "title": "Manage Bookings"}
+        ]
+        ws = WhatsAppService()
+        await ws.send_interactive_buttons(phone, msg, buttons)
+
+    @classmethod
+    async def _send_greeting_menu(cls, phone: str, sender_name: str) -> None:
+        """Sends a friendly welcome menu for greeting intents."""
+        msg = f"Hello {sender_name}! I am your Virtual Clinic Assistant.\nHow can I help you today?"
+        buttons = [
+            {"id": "btn_book", "title": "Book Appointment"},
+            {"id": "btn_manage", "title": "Manage Bookings"}
+        ]
+        ws = WhatsAppService()
+        await ws.send_interactive_buttons(phone, msg, buttons)
+
+    @classmethod
+    async def _start_booking_flow(cls, phone: str, db: AsyncSession, clinic_id: int) -> None:
+        """Loads doctors and sends interactive list."""
+        result = await db.execute(select(Doctor).where(Doctor.clinic_id == clinic_id))
+        doctors = result.scalars().all()
+        
+        if not doctors:
+            await cls._send_text(phone, "Sorry, there are no doctors available in the database at the moment.")
+            return
+
+        rows = []
+        for doc in doctors:
+            rows.append({
+                "id": f"doc_{doc.id}",
+                "title": f"Dr. {doc.name}",
+                "description": doc.specialty
+            })
+            
+        sections = [{
+            "title": "Available Specialists",
+            "rows": rows[:10]  # Meta limit is 10 rows
+        }]
+        
+        whatsapp_service = WhatsAppService()
+        await whatsapp_service.send_interactive_list(
+            recipient_id=phone,
+            text="Please select a doctor to book your appointment:",
+            button_label="View Doctors",
+            sections=sections,
+            header="Doctor Selection"
+        )
+        
+        await SessionService.save_session(phone, {
+            "step": "select_doctor",
+            "data": {"flow": "booking"}
+        }, clinic_id)
+
+    @classmethod
+    async def _start_manage_flow(cls, phone: str, db: AsyncSession, clinic_id: int) -> None:
+        """Retrieves active bookings and displays them for cancellation/rescheduling."""
+        # 1. Lookup Patient
+        patient_stmt = select(Patient).where(Patient.phone_number.like(f"%{phone}%"), Patient.clinic_id == clinic_id)
+        patient_res = await db.execute(patient_stmt)
+        patient = patient_res.scalars().first()
+        
+        if not patient:
+            await cls._send_text(phone, "You do not have any registered patient profile or upcoming bookings.")
+            return
+
+        # 2. Get active bookings
+        appt_stmt = (
+            select(Appointment, Doctor, TimeSlot)
+            .join(Doctor, Appointment.doctor_id == Doctor.id)
+            .join(TimeSlot, Appointment.timeslot_id == TimeSlot.id)
+            .where(Appointment.patient_id == patient.id, Appointment.status == "scheduled", Appointment.clinic_id == clinic_id)
+            .order_by(TimeSlot.start_time.asc())
+        )
+        appt_res = await db.execute(appt_stmt)
+        appointments = appt_res.all()
+        
+        if not appointments:
+            await cls._send_text(phone, "You do not have any upcoming scheduled appointments.")
+            return
+
+        rows = []
+        for appt, doc, slot in appointments:
+            formatted_time = slot.start_time.strftime("%b %d at %I:%M %p")
+            rows.append({
+                "id": f"appt_{appt.id}",
+                "title": f"Dr. {doc.name}",
+                "description": formatted_time
+            })
+            
+        sections = [{
+            "title": "Your Bookings",
+            "rows": rows[:10]
+        }]
+
+        whatsapp_service = WhatsAppService()
+        await whatsapp_service.send_interactive_list(
+            recipient_id=phone,
+            text="Here are your upcoming appointments. Select one to cancel or reschedule:",
+            button_label="Choose Appointment",
+            sections=sections,
+            header="My Appointments"
+        )
+
+        await SessionService.save_session(phone, {
+            "step": "select_appointment_action",
+            "data": {"flow": "manage"}
+        }, clinic_id)
+
+    # --- STEP HANDLERS ---
+
+    @classmethod
+    async def _handle_select_doctor(cls, phone: str, msg_type: str, payload: str, session: Dict[str, Any], db: AsyncSession, clinic_id: int) -> None:
+        if msg_type != "interactive" or not payload.startswith("doc_"):
+            await cls._send_text(phone, "Invalid selection. Please choose a doctor from the interactive list.")
+            return
+
+        doctor_id = int(payload.split("_")[1])
+        
+        # Load timeslots starting from today
+        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        stmt = (
+            select(TimeSlot)
+            .where(TimeSlot.doctor_id == doctor_id, TimeSlot.is_available == True, TimeSlot.start_time >= today, TimeSlot.clinic_id == clinic_id)
+            .order_by(TimeSlot.start_time.asc())
+        )
+        res = await db.execute(stmt)
+        slots = res.scalars().all()
+        
+        if not slots:
+            await cls._send_text(phone, "Sorry, this doctor does not have any available timeslots. Please choose 'book' to try another doctor.")
+            await SessionService.clear_session(phone, clinic_id)
+            return
+
+        # Extract unique dates
+        unique_dates = sorted(list(set(s.start_time.date() for s in slots)))
+        
+        rows = []
+        for dt in unique_dates[:10]:
+            rows.append({
+                "id": f"date_{dt.isoformat()}",
+                "title": dt.strftime("%A, %b %d"),
+                "description": f"Available slots on this day"
+            })
+            
+        sections = [{
+            "title": "Available Dates",
+            "rows": rows
+        }]
+
+        whatsapp_service = WhatsAppService()
+        await whatsapp_service.send_interactive_list(
+            recipient_id=phone,
+            text="Please select an appointment date:",
+            button_label="Choose Date",
+            sections=sections,
+            header="Select Date"
+        )
+        
+        session["step"] = "select_date"
+        session["data"]["doctor_id"] = doctor_id
+        await SessionService.save_session(phone, session, clinic_id)
+
+    @classmethod
+    async def _handle_select_date(cls, phone: str, msg_type: str, payload: str, session: Dict[str, Any], db: AsyncSession, clinic_id: int) -> None:
+        if msg_type != "interactive" or not payload.startswith("date_"):
+            await cls._send_text(phone, "Invalid selection. Please choose a date from the list.")
+            return
+
+        date_str = payload.split("_")[1]
+        
+        session["step"] = "select_slot"
+        session["data"]["date"] = date_str
+        session["data"]["slot_offset"] = 0
+        await SessionService.save_session(phone, session, clinic_id)
+        
+        await cls._show_slots_page(phone, session, db, clinic_id)
+
+    @classmethod
+    async def _show_slots_page(cls, phone: str, session: Dict[str, Any], db: AsyncSession, clinic_id: int) -> None:
+        date_str = session["data"]["date"]
+        doctor_id = session["data"]["doctor_id"]
+        offset = session["data"].get("slot_offset", 0)
+        
+        dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+        
+        # Query slots on this date
+        start_dt = datetime.combine(dt, datetime.min.time())
+        end_dt = datetime.combine(dt, datetime.max.time())
+        
+        stmt = (
+            select(TimeSlot)
+            .where(TimeSlot.doctor_id == doctor_id, TimeSlot.is_available == True, TimeSlot.start_time >= start_dt, TimeSlot.start_time <= end_dt, TimeSlot.clinic_id == clinic_id)
+            .order_by(TimeSlot.start_time.asc())
+        )
+        res = await db.execute(stmt)
+        slots = res.scalars().all()
+        
+        if not slots:
+            await cls._send_text(phone, "No slots found on this date. Please type 'book' to restart.")
+            await SessionService.clear_session(phone, clinic_id)
+            return
+
+        page_slots = slots[offset:offset+9]
+        has_more = len(slots) > offset + 9
+
+        rows = []
+        for slot in page_slots:
+            rows.append({
+                "id": f"slot_{slot.id}",
+                "title": slot.start_time.strftime("%I:%M %p"),
+                "description": f"Duration: 30 mins"
+            })
+            
+        if has_more:
+            rows.append({
+                "id": f"more_slots_{offset+9}",
+                "title": "➡️ See later times",
+                "description": "Show next available slots"
+            })
+            
+        sections = [{
+            "title": "Available Timeslots",
+            "rows": rows
+        }]
+
+        whatsapp_service = WhatsAppService()
+        await whatsapp_service.send_interactive_list(
+            recipient_id=phone,
+            text=f"Please choose a time on {dt.strftime('%b %d')}:",
+            button_label="Choose Time",
+            sections=sections,
+            header="Select Time"
+        )
+
+    @classmethod
+    async def _handle_select_slot(cls, phone: str, msg_type: str, payload: str, session: Dict[str, Any], db: AsyncSession, clinic_id: int) -> None:
+        if msg_type != "interactive":
+            await cls._send_text(phone, "Invalid selection. Please choose a slot from the list.")
+            return
+
+        if payload.startswith("more_slots_"):
+            # Update offset and re-render slots
+            offset = int(payload.split("_")[2])
+            session["data"]["slot_offset"] = offset
+            await SessionService.save_session(phone, session, clinic_id)
+            await cls._show_slots_page(phone, session, db, clinic_id)
+            return
+
+        if not payload.startswith("slot_"):
+            await cls._send_text(phone, "Invalid selection. Please choose a slot from the list.")
+            return
+
+        slot_id = int(payload.split("_")[1])
+        doctor_id = session["data"]["doctor_id"]
+        
+        # Get doctor and timeslot details
+        doc_stmt = select(Doctor).where(Doctor.id == doctor_id)
+        doc_res = await db.execute(doc_stmt)
+        doctor = doc_res.scalars().first()
+        
+        slot_stmt = select(TimeSlot).where(TimeSlot.id == slot_id)
+        slot_res = await db.execute(slot_stmt)
+        slot = slot_res.scalars().first()
+        
+        if not doctor or not slot or not slot.is_available:
+            await cls._send_text(phone, "This timeslot is no longer available. Type 'book' to restart.")
+            await SessionService.clear_session(phone, clinic_id)
+            return
+
+        formatted_summary = (
+            f"📋 *Appointment Summary:*\n\n"
+            f"• *Doctor:* Dr. {doctor.name} ({doctor.specialty})\n"
+            f"• *Date:* {slot.start_time.strftime('%A, %b %d, %Y')}\n"
+            f"• *Time:* {slot.start_time.strftime('%I:%M %p')}\n\n"
+            f"Do you want to confirm this booking?"
+        )
+        
+        buttons = [
+            {"id": "btn_confirm", "title": "Confirm Booking"},
+            {"id": "btn_cancel", "title": "Cancel"}
+        ]
+
+        whatsapp_service = WhatsAppService()
+        await whatsapp_service.send_interactive_buttons(
+            recipient_id=phone,
+            text=formatted_summary,
+            buttons=buttons
+        )
+
+        session["step"] = "confirm"
+        session["data"]["timeslot_id"] = slot_id
+        await SessionService.save_session(phone, session, clinic_id)
+
+    @classmethod
+    async def _handle_confirm_booking(
+        cls,
+        phone: str,
+        sender_name: str,
+        msg_type: str,
+        payload: str,
+        session: Dict[str, Any],
+        db: AsyncSession,
+        clinic_id: int
+    ) -> None:
+        if msg_type != "interactive" or payload not in ("btn_confirm", "btn_cancel"):
+            await cls._send_text(phone, "Please use the buttons above to Confirm or Cancel.")
+            return
+
+        if payload == "btn_cancel":
+            await cls._send_text(phone, "Booking request discarded.")
+            await SessionService.clear_session(phone, clinic_id)
+            return
+
+        slot_id = session["data"]["timeslot_id"]
+        doctor_id = session["data"]["doctor_id"]
+        
+        # Double check timeslot availability
+        slot_stmt = select(TimeSlot).where(TimeSlot.id == slot_id)
+        slot_res = await db.execute(slot_stmt)
+        slot = slot_res.scalars().first()
+        
+        if not slot or not slot.is_available:
+            await cls._send_text(phone, "This timeslot has just been booked by someone else. Type 'book' to try a different one.")
+            await SessionService.clear_session(phone, clinic_id)
+            return
+
+        # 1. Find or create Patient
+        pat_stmt = select(Patient).where(Patient.phone_number.like(f"%{phone}%"), Patient.clinic_id == clinic_id)
+        pat_res = await db.execute(pat_stmt)
+        patient = pat_res.scalars().first()
+        
+        if not patient:
+            patient = Patient(name=sender_name, phone_number=phone, clinic_id=clinic_id)
+            db.add(patient)
+            await db.commit()
+            await db.refresh(patient)
+            logger.info(f"Created patient profile for {sender_name} ({phone})")
+
+        # 2. Book appointment
+        appt = Appointment(
+            clinic_id=clinic_id,
+            patient_id=patient.id,
+            doctor_id=doctor_id,
+            timeslot_id=slot_id,
+            status="scheduled"
+        )
+        db.add(appt)
+        
+        # 3. Mark timeslot booked
+        slot.is_available = False
+        
+        await db.commit()
+        await db.refresh(appt)
+
+        # Broadcast appointment booking via WebSocket
+        try:
+            from app.services.websocket_manager import manager
+            await manager.broadcast("appointment_booked", {
+                "id": appt.id,
+                "patient_id": patient.id,
+                "doctor_id": doctor_id,
+                "timeslot_id": slot_id,
+                "status": appt.status,
+                "patient_name": patient.name,
+                "start_time": slot.start_time.isoformat()
+            })
+        except Exception as ws_err:
+            logger.error(f"Failed to broadcast appointment_booked: {ws_err}")
+        
+        # Load doctor info for final response
+        doc_stmt = select(Doctor).where(Doctor.id == doctor_id)
+        doc_res = await db.execute(doc_stmt)
+        doctor = doc_res.scalars().first()
+        
+        start_str = slot.start_time.strftime("%I:%M %p on %B %d, %Y")
+        success_msg = (
+            f"✅ *Appointment Confirmed!*\n\n"
+            f"Your booking with Dr. {doctor.name} at {start_str} is confirmed.\n"
+            f"Appointment ID: #{appt.id}."
+        )
+        await cls._send_text(phone, success_msg)
+
+        # 4. Schedule reminder 24 hours before the appointment
+        reminder_time = slot.start_time - timedelta(hours=24)
+        SchedulerService.schedule_reminder(appt.id, reminder_time)
+
+        # 5. Clear Session
+        await SessionService.clear_session(phone, clinic_id)
+
+    # --- MANAGEMENT ACTIONS HANDLERS ---
+
+    @classmethod
+    async def _handle_select_appointment_action(cls, phone: str, msg_type: str, payload: str, session: Dict[str, Any], db: AsyncSession, clinic_id: int) -> None:
+        if msg_type != "interactive" or not payload.startswith("appt_"):
+            await cls._send_text(phone, "Invalid selection. Please choose an appointment from the list.")
+            return
+
+        appt_id = int(payload.split("_")[1])
+        
+        # Query appointment details
+        stmt = (
+            select(Appointment, Doctor, TimeSlot)
+            .join(Doctor, Appointment.doctor_id == Doctor.id)
+            .join(TimeSlot, Appointment.timeslot_id == TimeSlot.id)
+            .where(Appointment.id == appt_id, Appointment.clinic_id == clinic_id)
+        )
+        res = await db.execute(stmt)
+        row = res.first()
+        
+        if not row:
+            await cls._send_text(phone, "Appointment details not found. Please type 'bookings' to view again.")
+            await SessionService.clear_session(phone, clinic_id)
+            return
+            
+        appt, doctor, slot = row
+        
+        formatted_summary = (
+            f"Manage Appointment:\n"
+            f"Doctor: Dr. {doctor.name}\n"
+            f"Time: {slot.start_time.strftime('%b %d at %I:%M %p')}\n\n"
+            f"What would you like to do?"
+        )
+        
+        buttons = [
+            {"id": f"btn_appt_cancel_{appt.id}", "title": "Cancel Appointment"},
+            {"id": f"btn_appt_resch_{appt.id}", "title": "Reschedule"}
+        ]
+        
+        whatsapp_service = WhatsAppService()
+        await whatsapp_service.send_interactive_buttons(
+            recipient_id=phone,
+            text=formatted_summary,
+            buttons=buttons
+        )
+        
+        session["step"] = "confirm_appointment_action"
+        session["data"]["appointment_id"] = appt_id
+        await SessionService.save_session(phone, session, clinic_id)
+
+    @classmethod
+    async def _handle_confirm_appointment_action(cls, phone: str, msg_type: str, payload: str, session: Dict[str, Any], db: AsyncSession, clinic_id: int) -> None:
+        if msg_type != "interactive" or not (payload.startswith("btn_appt_cancel_") or payload.startswith("btn_appt_resch_")):
+            await cls._send_text(phone, "Please tap one of the option buttons above.")
+            return
+
+        appt_id = session["data"]["appointment_id"]
+        
+        # Retrieve appointment
+        stmt = select(Appointment, TimeSlot).join(TimeSlot, Appointment.timeslot_id == TimeSlot.id).where(Appointment.id == appt_id, Appointment.clinic_id == clinic_id)
+        res = await db.execute(stmt)
+        row = res.first()
+        
+        if not row:
+            await cls._send_text(phone, "Appointment not found. Resetting session.")
+            await SessionService.clear_session(phone, clinic_id)
+            return
+            
+        appt, slot = row
+        
+        if payload.startswith("btn_appt_cancel_"):
+            # Mark canceled
+            appt.status = "canceled"
+            slot.is_available = True
+            await db.commit()
+            
+            # Broadcast appointment update via WebSocket
+            try:
+                from app.services.websocket_manager import manager
+                await manager.broadcast("appointment_updated", {
+                    "id": appt.id,
+                    "status": appt.status,
+                    "timeslot_id": slot.id,
+                    "timeslot_available": slot.is_available
+                })
+            except Exception as ws_err:
+                logger.error(f"Failed to broadcast appointment_updated: {ws_err}")
+            
+            await cls._send_text(phone, "❌ Your appointment has been canceled successfully.")
+            await SessionService.clear_session(phone, clinic_id)
+            
+        elif payload.startswith("btn_appt_resch_"):
+            # Mark current canceled first
+            appt.status = "canceled"
+            slot.is_available = True
+            await db.commit()
+            
+            # Broadcast appointment update via WebSocket
+            try:
+                from app.services.websocket_manager import manager
+                await manager.broadcast("appointment_updated", {
+                    "id": appt.id,
+                    "status": appt.status,
+                    "timeslot_id": slot.id,
+                    "timeslot_available": slot.is_available
+                })
+            except Exception as ws_err:
+                logger.error(f"Failed to broadcast appointment_updated: {ws_err}")
+            
+            await cls._send_text(phone, "Your old appointment is cancelled. Let's schedule your new slot.")
+            # Immediately launch doctor list
+            await cls._start_booking_flow(phone, db, clinic_id)
+
+    # --- REMINDER ACTION HANDLER ---
+
+    @classmethod
+    async def _handle_reminder_action(cls, phone: str, payload: str, db: AsyncSession, clinic_id: int) -> None:
+        """Processes responses from confirmation reminders."""
+        parts = payload.split("_")
+        action = parts[2]  # "confirm" or "resch"
+        appt_id = int(parts[3])
+        
+        stmt = select(Appointment, TimeSlot).join(TimeSlot, Appointment.timeslot_id == TimeSlot.id).where(Appointment.id == appt_id, Appointment.clinic_id == clinic_id)
+        res = await db.execute(stmt)
+        row = res.first()
+        
+        if not row:
+            await cls._send_text(phone, "Appointment details not found.")
+            return
+            
+        appt, slot = row
+        
+        if action == "confirm":
+            appt.status = "confirmed"
+            await db.commit()
+            await cls._send_text(phone, "👍 Thank you for confirming your appointment! We look forward to seeing you.")
+            
+            # Broadcast appointment update via WebSocket
+            try:
+                from app.services.websocket_manager import manager
+                await manager.broadcast("appointment_updated", {
+                    "id": appt.id,
+                    "status": appt.status,
+                    "timeslot_id": slot.id,
+                    "timeslot_available": slot.is_available
+                })
+            except Exception as ws_err:
+                logger.error(f"Failed to broadcast appointment_updated: {ws_err}")
+            
+        elif action == "resch":
+            # Cancel old appointment
+            appt.status = "canceled"
+            slot.is_available = True
+            await db.commit()
+            
+            # Broadcast appointment update via WebSocket
+            try:
+                from app.services.websocket_manager import manager
+                await manager.broadcast("appointment_updated", {
+                    "id": appt.id,
+                    "status": appt.status,
+                    "timeslot_id": slot.id,
+                    "timeslot_available": slot.is_available
+                })
+            except Exception as ws_err:
+                logger.error(f"Failed to broadcast appointment_updated: {ws_err}")
+            
+            await cls._send_text(phone, "Your old booking has been released. Let's choose a new slot.")
+            await cls._start_booking_flow(phone, db, clinic_id)
+
+    # --- HELPERS ---
+
+    @classmethod
+    async def _send_text(cls, phone: str, text: str) -> None:
+        whatsapp_service = WhatsAppService()
+        await whatsapp_service.send_text_message(phone, text)

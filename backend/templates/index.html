@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Web Integration Console</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Local CSS Link -->
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar Panel for Settings and Logs -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo-area">
+                    <span class="logo-icon"><i class="fab fa-whatsapp"></i></span>
+                    <div class="logo-text">
+                        <h1>WhatsApp API</h1>
+                        <span class="status-badge online"><span class="pulse"></span> Connected</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Credentials / Config Manager -->
+            <div class="sidebar-section">
+                <h3 class="section-title"><i class="fas fa-sliders-h"></i> Instance Config</h3>
+                <div class="config-card">
+                    <div class="config-item">
+                        <label>Phone Number ID</label>
+                        <div class="config-value" title="{{ phone_number_id }}">
+                            <code>{{ phone_number_id }}</code>
+                        </div>
+                    </div>
+                    <div class="config-item">
+                        <label>Webhook Verify Token</label>
+                        <div class="config-value" title="{{ verify_token }}">
+                            <code>{{ verify_token }}</code>
+                        </div>
+                    </div>
+                    <div class="config-item">
+                        <label>Meta API Version</label>
+                        <div class="config-value">
+                            <code>v22.0 / v19.0</code>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Active Chat Selector -->
+            <div class="sidebar-section">
+                <h3 class="section-title"><i class="fas fa-user-edit"></i> Direct Recipient</h3>
+                <div class="recipient-form">
+                    <p class="section-desc">Enter the phone number with country code (e.g. 923001234567) to initiate a conversation.</p>
+                    <div class="input-wrapper">
+                        <span class="input-icon"><i class="fas fa-phone"></i></span>
+                        <input type="text" id="recipientPhone" placeholder="Country Code + Number" value="92">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Instructions Area -->
+            <div class="sidebar-section instructions">
+                <h3 class="section-title"><i class="fas fa-info-circle"></i> Connection Guide</h3>
+                <div class="info-bubble">
+                    <p>To receive incoming messages:</p>
+                    <ol>
+                        <li>Expose port <code>8000</code> using ngrok:
+                            <pre><code>ngrok http 8000</code></pre>
+                        </li>
+                        <li>Configure Meta webhook endpoint to:
+                            <pre><code>[ngrok-url]/webhook</code></pre>
+                        </li>
+                    </ol>
+                </div>
+            </div>
+
+            <div class="sidebar-footer">
+                <p>Antigravity WhatsApp Hub v1.0.0</p>
+            </div>
+        </aside>
+
+        <!-- Main Chat Area -->
+        <main class="chat-area">
+            <!-- Active Chat Header -->
+            <header class="chat-header">
+                <div class="chat-user-info">
+                    <div class="avatar-placeholder">
+                        <i class="fas fa-user-circle"></i>
+                    </div>
+                    <div>
+                        <h2 id="activeChatLabel">Select a Recipient</h2>
+                        <span class="active-status">Meta Cloud Routing Active</span>
+                    </div>
+                </div>
+                <div class="header-actions">
+                    <button id="refreshBtn" title="Refresh Feed"><i class="fas fa-sync-alt"></i></button>
+                    <button title="More Info"><i class="fas fa-ellipsis-v"></i></button>
+                </div>
+            </header>
+
+            <!-- Chat Message Feed -->
+            <div class="messages-container" id="messagesContainer">
+                <div class="welcome-screen" id="welcomeScreen">
+                    <div class="welcome-illustration">
+                        <i class="fab fa-whatsapp"></i>
+                    </div>
+                    <h2>WhatsApp Developer Console</h2>
+                    <p>Send and receive messages in real time using Meta's Cloud API. Enter a target number in the sidebar to start chat emulation.</p>
+                </div>
+                <!-- Dynamic messages inject here -->
+            </div>
+
+            <!-- Chat Input Bar -->
+            <footer class="chat-input-area">
+                <form id="chatForm" class="input-form">
+                    <button type="button" class="attachment-btn" title="Add File"><i class="fas fa-plus"></i></button>
+                    <input type="text" id="messageInput" placeholder="Type a message..." required autocomplete="off" disabled>
+                    <button type="submit" class="send-btn" id="sendBtn" disabled><i class="fas fa-paper-plane"></i></button>
+                </form>
+            </footer>
+        </main>
+    </div>
+
+    <!-- Script Import -->
+    <script src="{{ url_for('static', path='script.js') }}"></script>
+</body>
+</html>
