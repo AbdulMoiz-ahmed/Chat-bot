@@ -39,7 +39,7 @@ class WhatsAppService:
             "text": {"body": text}
         }
         
-        logger.info(f"Sending echo message to {recipient_id} via WhatsApp API...")
+        logger.info(f"Sending message to {recipient_id} via WhatsApp API...")
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.post(url, json=payload, headers=headers)
@@ -52,6 +52,55 @@ class WhatsAppService:
             except Exception as e:
                 logger.error(f"Exception while sending message: {e}")
                 return {"status": "exception", "error": str(e)}
+
+    async def send_typing_on(self, recipient_id: str) -> None:
+        """
+        Sends a typing indicator status update to the recipient.
+        """
+        if not self.access_token or not self.phone_number_id or self.access_token == "your_access_token_here":
+            return
+        url = f"https://graph.facebook.com/v18.0/{self.phone_number_id}/messages"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": recipient_id,
+            "typing_indicator": {
+                "type": "text"
+            }
+        }
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(url, json=payload, headers=headers)
+                if response.status_code >= 400:
+                    logger.error(f"Failed to trigger typing indicator: {response.text}")
+            except Exception as e:
+                logger.error(f"Failed to send typing indicator: {e}")
+
+    async def send_read_receipt(self, recipient_id: str, message_id: str) -> None:
+        """
+        Sends a read status update (blue tick) for the received message.
+        """
+        if not self.access_token or not self.phone_number_id or self.access_token == "your_access_token_here":
+            return
+        url = f"https://graph.facebook.com/v18.0/{self.phone_number_id}/messages"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": message_id
+        }
+        async with httpx.AsyncClient() as client:
+            try:
+                await client.post(url, json=payload, headers=headers)
+            except Exception as e:
+                logger.error(f"Failed to send read receipt: {e}")
 
     async def get_media_url(self, media_id: str) -> str:
         """

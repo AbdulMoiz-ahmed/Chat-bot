@@ -279,6 +279,188 @@ async def block_timeslot(req: BlockTimeSlotRequest, db: AsyncSession = Depends(g
         "is_blocked": slot.is_blocked
     }}
 
+# --- Conversations Endpoints (phone-number based, not patient-dependent) ---
+
+class SaveContactNameRequest(BaseModel):
+    name: str
+
+@router.get("/portal/conversations")
+async def get_conversations(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Build conversation threads from the messages table.
+    Groups messages by phone number (the non-'Me (You)' party),
+    returns each thread with the contact's name (from patients table if exists),
+    last message preview, and unread count.
+    """
+    # Get all messages for this clinic
+    query = select(Message)
+    if current_user.clinic_id is not None:
+        query = query.where(Message.clinic_id == current_user.clinic_id)
+    result = await db.execute(query.order_by(Message.timestamp.asc()))
+    all_messages = result.scalars().all()
+
+    # Group messages by the other party's phone number
+    threads: dict = {}  # phone_number -> { messages, last_message, ... }
+    for msg in all_messages:
+        # Determine the other party's phone number
+        if msg.sender == "Me (You)":
+            phone = msg.recipient
+        else:
+            phone = msg.sender
+        
+        if not phone:
+            continue
+        
+        # Normalize phone
+        clean_phone = phone.replace("+", "").strip()
+        if not clean_phone:
+            continue
+
+        if clean_phone not in threads:
+            threads[clean_phone] = {
+                "phone_number": clean_phone,
+                "messages": [],
+                "last_message": None,
+                "unread_count": 0,
+            }
+        
+        threads[clean_phone]["messages"].append(msg)
+        threads[clean_phone]["last_message"] = msg
+        # Count incoming messages that aren't read
+        if msg.sender != "Me (You)" and msg.status not in ("read",):
+            threads[clean_phone]["unread_count"] += 1
+
+    # Now look up patient names for each phone number
+    conversations = []
+    for phone, thread_data in threads.items():
+        # Try to find patient record with matching phone
+        patient_result = await db.execute(
+            select(Patient).where(
+                or_(
+                    Patient.phone_number.like(f"%{phone}%"),
+                    Patient.phone_number.like(f"%{phone[-10:]}%") if len(phone) >= 10 else Patient.phone_number.like(f"%{phone}%")
+                )
+            ).limit(1)
+        )
+        patient = patient_result.scalars().first()
+        
+        last_msg = thread_data["last_message"]
+        conversations.append({
+            "phone_number": phone,
+            "name": patient.name if patient else None,
+            "patient_id": patient.id if patient else None,
+            "last_message": {
+                "text": last_msg.text if last_msg else None,
+                "timestamp": last_msg.timestamp.isoformat() if last_msg else None,
+                "status": last_msg.status if last_msg else None,
+                "sender": last_msg.sender if last_msg else None,
+            } if last_msg else None,
+            "unread_count": thread_data["unread_count"],
+            "message_count": len(thread_data["messages"]),
+        })
+    
+    # Sort by last message timestamp (newest first)
+    conversations.sort(
+        key=lambda c: c["last_message"]["timestamp"] if c.get("last_message") and c["last_message"].get("timestamp") else "",
+        reverse=True
+    )
+    
+    return conversations
+
+
+@router.get("/portal/conversations/{phone}/messages")
+async def get_conversation_messages(
+    phone: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get all messages for a specific phone number conversation."""
+    clean_phone = phone.replace("+", "").strip()
+    
+    query = select(Message).where(
+        or_(
+            Message.sender.like(f"%{clean_phone}%"),
+            Message.recipient.like(f"%{clean_phone}%")
+        )
+    )
+    if current_user.clinic_id is not None:
+        query = query.where(Message.clinic_id == current_user.clinic_id)
+    
+    result = await db.execute(query.order_by(Message.timestamp.asc()))
+    messages = result.scalars().all()
+    
+    return [
+        {
+            "id": msg.whatsapp_message_id or f"db_{msg.id}",
+            "sender": msg.sender,
+            "recipient": msg.recipient,
+            "text": msg.text,
+            "status": msg.status,
+            "timestamp": msg.timestamp.isoformat(),
+            "msg_type": msg.msg_type,
+        }
+        for msg in messages
+    ]
+
+
+@router.put("/portal/conversations/{phone}/name")
+async def save_contact_name(
+    phone: str,
+    req: SaveContactNameRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Save or update contact name. If patient exists, update their name. Otherwise create a new patient record."""
+    clean_phone = phone.replace("+", "").strip()
+    new_name = req.name.strip()
+    
+    if not new_name:
+        raise HTTPException(status_code=400, detail="Name cannot be empty")
+    
+    # Resolve clinic_id
+    clinic_id = current_user.clinic_id
+    if clinic_id is None:
+        from app.models.clinic import Clinic
+        result = await db.execute(select(Clinic).limit(1))
+        first_clinic = result.scalars().first()
+        if first_clinic:
+            clinic_id = first_clinic.id
+        else:
+            raise HTTPException(status_code=400, detail="No clinic found")
+    
+    # Check if patient already exists with this phone number
+    patient_result = await db.execute(
+        select(Patient).where(
+            or_(
+                Patient.phone_number == clean_phone,
+                Patient.phone_number == f"+{clean_phone}",
+                Patient.phone_number.like(f"%{clean_phone}%")
+            )
+        ).limit(1)
+    )
+    patient = patient_result.scalars().first()
+    
+    if patient:
+        patient.name = new_name
+        await db.commit()
+        await db.refresh(patient)
+        return {"success": True, "message": "Contact name updated", "patient_id": patient.id, "name": patient.name}
+    else:
+        # Create new patient record
+        new_patient = Patient(
+            clinic_id=clinic_id,
+            name=new_name,
+            phone_number=clean_phone,
+        )
+        db.add(new_patient)
+        await db.commit()
+        await db.refresh(new_patient)
+        return {"success": True, "message": "Contact created", "patient_id": new_patient.id, "name": new_patient.name}
+
+
 # --- Patient & Messaging Endpoints ---
 
 @router.get("/portal/patients")
@@ -394,7 +576,7 @@ async def get_patient_history(patient_id: int, db: AsyncSession = Depends(get_db
     return payload
 
 @router.post("/portal/send")
-async def send_portal_message(req: SendMessageRequest, db: AsyncSession = Depends(get_db)):
+async def send_portal_message(req: SendMessageRequest, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     number = req.phone_number.strip()
     # Ensure Meta Cloud API expects sender without leading +
     clean_number = number.replace("+", "").strip()
@@ -405,6 +587,20 @@ async def send_portal_message(req: SendMessageRequest, db: AsyncSession = Depend
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Phone number and message text are required"
         )
+
+    # Resolve clinic_id: use user's clinic, or fall back to first clinic for SUPER_ADMIN
+    clinic_id = current_user.clinic_id
+    if clinic_id is None:
+        from app.models.clinic import Clinic
+        result = await db.execute(select(Clinic).limit(1))
+        first_clinic = result.scalars().first()
+        if first_clinic:
+            clinic_id = first_clinic.id
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No clinic found. Please create a clinic first."
+            )
         
     whatsapp_service = WhatsAppService()
     result = await whatsapp_service.send_text_message(clean_number, text)
@@ -422,6 +618,7 @@ async def send_portal_message(req: SendMessageRequest, db: AsyncSession = Depend
             recipient=clean_number,
             text=text,
             msg_type="text",
+            clinic_id=clinic_id,
             whatsapp_message_id=msg_id,
             status="sent"
         )

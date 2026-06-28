@@ -15,39 +15,49 @@ class LLMExtractor:
     @staticmethod
     async def extract_intent(text: str) -> dict:
         """
-        Sends the patient's free-text message to Gemini to extract intent.
+        Sends the patient's free-text message to Gemini to extract intent AND generate
+        a contextual natural-language response matching the patient's language (Urdu, Roman Urdu, Hindi, English, etc.).
+        
         Expects a JSON response with the following structure:
         {
-            "intent": "book_appointment" | "cancel_appointment" | "get_info" | "unknown",
-            "date": "YYYY-MM-DD" or null,
+            "intent": "book_appointment" | "cancel_appointment" | "get_info" | "greeting" | "chit_chat" | "unknown",
+            "date": "YYYY-MM-DD" or "tomorrow" or null,
             "time": "HH:MM" or null,
-            "doctor_name": "name" or null
+            "doctor_name": "name" or null,
+            "conversational_response": "Friendly personalized response in the user's input language/script answering their specific message. Always sound like an expert medical clinic assistant."
         }
         """
         if not settings.GEMINI_API_KEY:
             raise ValueError("GEMINI_API_KEY is missing")
 
         prompt = f"""
-You are an expert NLP intent extraction engine for a medical clinic WhatsApp bot.
-Your job is to read patient messages (which could be in English or Roman Urdu) and extract the intent and any entities (date, time, doctor name).
+You are a highly empathetic, professional medical clinic receptionist and virtual assistant.
+Your job is to read incoming patient messages, detect their language and script (e.g., English, Roman Urdu, Urdu script, Hindi, Spanish, etc.), extract key intent fields, and write a natural conversational response in their EXACT same language/style.
 
-Allowed Intents:
-1. book_appointment (e.g., "kal 5 baje dr ahmed se milna hai", "I need an appointment today")
-2. cancel_appointment (e.g., "cancel my appointment", "mera time cancel kar dein")
-3. get_info (e.g., "clinic kab khulta hai?", "what are your hours?")
-4. greeting (e.g., "hello", "hi", "salam", "hey")
-5. unknown (if the message doesn't make sense or is unrelated)
+Always attempt to reply contextually and helpfully to the patient's actual message. NEVER output basic, robotic "I don't understand" responses if you can help it. If they want to book or inquire about an appointment, guide them smoothly.
 
-Instructions:
-- If a date is mentioned (e.g., "kal", "tomorrow", "aaj", "today"), convert it to a rough date string or keep it relative if you must, but ideally try to deduce it if possible. Just returning the relative term like "tomorrow" is fine.
-- Return ONLY valid JSON. Do not include any markdown formatting like ```json or anything else. Just the raw JSON object.
+Intents:
+1. book_appointment: Patient wants to book or schedule a visit (e.g., "appointment chahiye", "milna hai dr ahmed se", "I want to schedule").
+2. cancel_appointment: Patient wants to cancel/manage booking.
+3. get_info: Patient asks about hours, fees, location, services, etc.
+4. greeting: Short greeting ("salam", "hello", "hi").
+5. chit_chat: Basic chatting, asking how you are, etc.
+6. unknown: If the message is completely spam, nonsense, or highly abusive.
 
-Example output:
+Instructions for "conversational_response":
+- Detect the input language & script. Reply in that script (e.g. if they write in Urdu script, write Urdu script; if Roman Urdu like "salam doctor saab", write in Roman Urdu; if English, write in English).
+- Keep it friendly, empathetic, and professional.
+- For book_appointment or cancel_appointment intents, acknowledge their request nicely and let them know you are opening the selector panel to help them choose a doctor/slot.
+
+Return ONLY valid JSON. Do not include any markdown formatting like ```json or anything else. Just the raw JSON object.
+
+Example output structure:
 {{
   "intent": "book_appointment",
   "date": "tomorrow",
   "time": "17:00",
-  "doctor_name": "ahmed"
+  "doctor_name": "ahmed",
+  "conversational_response": "Salam! Main aapki appointment book karne mein madad karta hoon. Specialty aur doctor select karne ke liye niche click karein."
 }}
 
 Patient Message:
@@ -62,7 +72,7 @@ Patient Message:
                 prompt,
                 generation_config=genai.types.GenerationConfig(
                     response_mime_type="application/json",
-                    temperature=0.0
+                    temperature=0.3
                 )
             )
             

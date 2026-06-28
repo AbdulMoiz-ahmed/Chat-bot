@@ -79,6 +79,20 @@ interface Message {
   msg_type: string;
 }
 
+interface Conversation {
+  phone_number: string;
+  name: string | null;
+  patient_id: number | null;
+  last_message: {
+    text: string;
+    timestamp: string;
+    status: string;
+    sender: string;
+  } | null;
+  unread_count: number;
+  message_count: number;
+}
+
 interface NlpLog {
   id: number;
   patient_phone: string;
@@ -124,11 +138,14 @@ export default function Dashboard() {
   const [nlpLogs, setNlpLogs] = useState<NlpLog[]>([]);
 
   // Inbox View State
-  const [inboxChats, setInboxChats] = useState<Patient[]>([]);
-  const [activeChat, setActiveChat] = useState<Patient | null>(null);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
   const [activeChatMessages, setActiveChatMessages] = useState<Message[]>([]);
   const [replyText, setReplyText] = useState<string>("");
   const chatBottomRef = useRef<HTMLDivElement | null>(null);
+  const [chatFilter, setChatFilter] = useState<string>("");
+  const [editingContactName, setEditingContactName] = useState<string | null>(null);
+  const [newContactName, setNewContactName] = useState<string>("");
 
   // TimeSlot Detail Modal
   const [selectedSlotDetails, setSelectedSlotDetails] = useState<TimeSlot | null>(null);
@@ -168,16 +185,16 @@ export default function Dashboard() {
             // 2. Add message to active chat if it matches active patient
             const patientPhone = newMsg.sender === "Me (You)" ? newMsg.recipient : newMsg.sender;
             
-            // Check if active chat matches this phone number
-            setActiveChat((prevActiveChat) => {
-              if (prevActiveChat) {
-                const cleanActive = prevActiveChat.phone_number.replace("+", "").trim();
+            // Check if active conversation matches this phone number
+            setActiveConversation((prevActive) => {
+              if (prevActive) {
+                const cleanActive = prevActive.phone_number.replace("+", "").trim();
                 const cleanMsgPhone = patientPhone.replace("+", "").trim();
                 if (cleanActive === cleanMsgPhone || cleanActive.endsWith(cleanMsgPhone) || cleanMsgPhone.endsWith(cleanActive)) {
                   setActiveChatMessages((prevMsgs) => [...prevMsgs, newMsg]);
                 }
               }
-              return prevActiveChat;
+              return prevActive;
             });
             
             // Also update history list if open
@@ -192,9 +209,9 @@ export default function Dashboard() {
               return prevHist;
             });
             
-            // Reload patient lists to update latest message details
+            // Reload conversation list to update latest message details
             fetchPatients();
-            fetchInboxChats();
+            fetchConversations();
           }
           
           if (eventName === "message_status_updated") {
@@ -239,7 +256,7 @@ export default function Dashboard() {
   useEffect(() => {
     fetchDoctors();
     fetchPatients();
-    fetchInboxChats();
+    fetchConversations();
   }, []);
 
   // Fetch timeslots whenever selectedDoctor or date changes
@@ -281,15 +298,13 @@ export default function Dashboard() {
     }
   };
 
-  const fetchInboxChats = async () => {
+  const fetchConversations = async () => {
     try {
-      const res = await fetch(`${API_BASE}/portal/patients`);
+      const res = await fetch(`${API_BASE}/portal/conversations`);
       const data = await res.json();
-      // Filter patients that have at least one message log (last_message is not null)
-      const chats = data.filter((p: Patient) => p.last_message !== null);
-      setInboxChats(chats);
+      setConversations(data);
     } catch (e) {
-      console.error("Error fetching inbox chats:", e);
+      console.error("Error fetching conversations:", e);
     }
   };
 
@@ -306,9 +321,9 @@ export default function Dashboard() {
     }
   };
 
-  const fetchChatMessages = async (patient: Patient) => {
+  const fetchChatMessages = async (phone: string) => {
     try {
-      const res = await fetch(`${API_BASE}/portal/patients/${patient.id}/history`);
+      const res = await fetch(`${API_BASE}/portal/conversations/${phone}/messages`);
       const data = await res.json();
       setActiveChatMessages(data);
     } catch (e) {
@@ -452,10 +467,10 @@ export default function Dashboard() {
 
   const handleSendManualReply = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeChat || !replyText.trim()) return;
+    if (!activeConversation || !replyText.trim()) return;
     
     const payload = {
-      phone_number: activeChat.phone_number,
+      phone_number: activeConversation.phone_number,
       text: replyText.trim()
     };
     
@@ -473,6 +488,29 @@ export default function Dashboard() {
       }
     } catch (e) {
       console.error("Error sending manual reply:", e);
+    }
+  };
+
+  const handleSaveContactName = async (phone: string) => {
+    if (!newContactName.trim()) return;
+    try {
+      const res = await fetch(`${API_BASE}/portal/conversations/${phone}/name`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newContactName.trim() })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setEditingContactName(null);
+        setNewContactName("");
+        fetchConversations();
+        // Update active conversation name
+        if (activeConversation && activeConversation.phone_number === phone) {
+          setActiveConversation({ ...activeConversation, name: data.name, patient_id: data.patient_id });
+        }
+      }
+    } catch (e) {
+      console.error("Error saving contact name:", e);
     }
   };
 
@@ -542,7 +580,7 @@ export default function Dashboard() {
             <button
               onClick={() => {
                 setActiveTab("inbox");
-                fetchInboxChats();
+                fetchConversations();
               }}
               className={`w-full flex items-center px-4 py-3 text-sm font-medium rounded-xl transition-all duration-200 ${
                 activeTab === "inbox"
@@ -768,31 +806,31 @@ export default function Dashboard() {
                   </div>
 
                   <div className="flex-1 overflow-y-auto divide-y divide-slate-800/40">
-                    {inboxChats.length === 0 ? (
+                    {conversations.length === 0 ? (
                       <div className="p-8 text-center text-slate-500 text-sm">
                         No active WhatsApp threads found.
                       </div>
                     ) : (
-                      inboxChats
+                      conversations
                         .filter(chat => 
-                          chat.name.toLowerCase().includes(patientSearch.toLowerCase()) ||
+                          (chat.name && chat.name.toLowerCase().includes(patientSearch.toLowerCase())) ||
                           chat.phone_number.includes(patientSearch)
                         )
                         .map((chat) => {
-                          const isActive = activeChat && activeChat.id === chat.id;
+                          const isActive = activeConversation && activeConversation.phone_number === chat.phone_number;
                           return (
                             <div
-                              key={chat.id}
+                              key={chat.phone_number}
                               onClick={async () => {
-                                setActiveChat(chat);
-                                await fetchChatMessages(chat);
+                                setActiveConversation(chat);
+                                await fetchChatMessages(chat.phone_number);
                               }}
                               className={`p-4 cursor-pointer transition-all duration-200 flex flex-col hover:bg-slate-800/40 ${
                                 isActive ? "bg-slate-800/70 border-l-4 border-indigo-500 pl-3" : ""
                               }`}
                             >
                               <div className="flex justify-between items-start mb-1">
-                                <span className="font-bold text-sm text-slate-200">{chat.name}</span>
+                                <span className="font-bold text-sm text-slate-200">{chat.name || `Unsaved (${chat.phone_number})`}</span>
                                 <span className="text-[10px] text-slate-500">
                                   {chat.last_message?.timestamp 
                                     ? new Date(chat.last_message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -820,20 +858,59 @@ export default function Dashboard() {
 
                 {/* Inbox Right Sidebar - Active Chat details & input */}
                 <div className="flex-1 flex flex-col bg-slate-950 overflow-hidden">
-                  {activeChat ? (
+                  {activeConversation ? (
                     <div className="flex-1 flex flex-col overflow-hidden">
                       {/* Chat Header */}
                       <div className="p-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
-                        <div>
-                          <h3 className="font-bold text-white">{activeChat.name}</h3>
-                          <p className="text-xs text-slate-400 flex items-center mt-0.5">
-                            <Phone className="w-3 h-3 mr-1 text-slate-500" />
-                            {activeChat.phone_number}
-                          </p>
+                        <div className="flex items-center space-x-4">
+                          <div>
+                            {editingContactName === activeConversation.phone_number ? (
+                              <div className="flex items-center space-x-2">
+                                <input
+                                  type="text"
+                                  placeholder="Enter contact name..."
+                                  value={newContactName}
+                                  onChange={(e) => setNewContactName(e.target.value)}
+                                  className="bg-slate-950 border border-slate-850 text-slate-100 px-3 py-1 text-sm rounded-lg outline-none focus:border-indigo-500"
+                                />
+                                <button
+                                  onClick={() => handleSaveContactName(activeConversation.phone_number)}
+                                  className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-2.5 py-1.5 rounded-lg font-semibold transition-colors"
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  onClick={() => setEditingContactName(null)}
+                                  className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-2.5 py-1.5 rounded-lg transition-colors"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center space-x-2.5">
+                                <h3 className="font-bold text-white text-base">
+                                  {activeConversation.name || `Unsaved (${activeConversation.phone_number})`}
+                                </h3>
+                                <button
+                                  onClick={() => {
+                                    setEditingContactName(activeConversation.phone_number);
+                                    setNewContactName(activeConversation.name || "");
+                                  }}
+                                  className="text-xs text-indigo-400 hover:text-indigo-300 underline font-medium"
+                                >
+                                  {activeConversation.name ? "Edit Name" : "Save Contact Name"}
+                                </button>
+                              </div>
+                            )}
+                            <p className="text-xs text-slate-400 flex items-center mt-0.5">
+                              <Phone className="w-3 h-3 mr-1 text-slate-500" />
+                              {activeConversation.phone_number}
+                            </p>
+                          </div>
                         </div>
                         
                         <button
-                          onClick={() => fetchChatMessages(activeChat)}
+                          onClick={() => fetchChatMessages(activeConversation.phone_number)}
                           className="bg-slate-800 hover:bg-slate-700 text-slate-300 p-2 rounded-xl transition-colors border border-slate-705"
                           title="Refresh Messages"
                         >
@@ -1345,9 +1422,19 @@ export default function Dashboard() {
                 onClick={() => {
                   // Quick reply redirect
                   setSelectedPatientHistory(null);
-                  setActiveChat(selectedPatientHistory);
+                  if (selectedPatientHistory) {
+                    const conv: Conversation = {
+                      phone_number: selectedPatientHistory.phone_number,
+                      name: selectedPatientHistory.name,
+                      patient_id: selectedPatientHistory.id,
+                      last_message: null,
+                      unread_count: 0,
+                      message_count: 0
+                    };
+                    setActiveConversation(conv);
+                    fetchChatMessages(selectedPatientHistory.phone_number);
+                  }
                   setActiveTab("inbox");
-                  fetchChatMessages(selectedPatientHistory);
                 }}
                 className="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs py-2 px-4 rounded-xl transition-colors shadow-md shadow-indigo-600/10"
               >

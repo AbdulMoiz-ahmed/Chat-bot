@@ -43,6 +43,14 @@ class TextHandler:
             timestamp=timestamp
         )
         
+        # Trigger read receipt (blue tick) and typing indicator
+        try:
+            ws_srv = WhatsAppService()
+            await ws_srv.send_read_receipt(sender, message_id)
+            await ws_srv.send_typing_on(sender)
+        except Exception as ws_err:
+            logger.error(f"Failed to send typing/read status: {ws_err}")
+        
         # 2. Forward to state machine dialog manager
         from app.services.booking_flow import BookingFlow
         await BookingFlow.handle_message(
