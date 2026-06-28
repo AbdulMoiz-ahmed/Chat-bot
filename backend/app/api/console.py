@@ -7,6 +7,8 @@ from app.core.config import settings
 from app.db.session import get_db
 from app.services.whatsapp_service import WhatsAppService
 from app.services.message_service import MessageService
+from app.api.deps import get_current_user
+from app.models.user import User
 import os
 
 router = APIRouter()
@@ -36,7 +38,7 @@ async def serve_console(request: Request):
     )
 
 @router.get("/messages")
-async def get_messages(db: AsyncSession = Depends(get_db)):
+async def get_messages(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Returns the recent messages history log from the database.
     """
@@ -54,7 +56,7 @@ async def get_messages(db: AsyncSession = Depends(get_db)):
     return messages_payload
 
 @router.post("/send")
-async def send_message(req: SendMessageRequest, db: AsyncSession = Depends(get_db)):
+async def send_message(req: SendMessageRequest, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     Sends a WhatsApp message via WhatsApp Cloud API and persists it to the database.
     """

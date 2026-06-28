@@ -10,9 +10,13 @@ from app.db.session import get_db
 from app.models.doctor import Doctor
 from app.models.patient import Patient
 from app.models.timeslot import TimeSlot
+from app.models.clinic import Clinic
 from app.models.appointment import Appointment
 from app.models.message import Message
+from app.api.deps import get_db, get_current_user
 from app.services.websocket_manager import manager
+from app.core.config import settings
+import jwt
 from app.services.whatsapp_service import WhatsAppService
 from app.services.message_service import MessageService
 from app.api.deps import get_current_user
@@ -28,6 +32,7 @@ class DoctorCreate(BaseModel):
     specialty: str
     email: Optional[str] = None
     phone_number: Optional[str] = None
+    bio: Optional[str] = None
 
 class DoctorResponse(BaseModel):
     id: int
@@ -35,7 +40,23 @@ class DoctorResponse(BaseModel):
     specialty: str
     email: Optional[str]
     phone_number: Optional[str]
+    bio: Optional[str]
     created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class ClinicSettingsUpdate(BaseModel):
+    address: Optional[str] = None
+    working_hours: Optional[str] = None
+    general_info: Optional[str] = None
+
+class ClinicSettingsResponse(BaseModel):
+    id: int
+    name: str
+    address: Optional[str]
+    working_hours: Optional[str]
+    general_info: Optional[str]
 
     class Config:
         from_attributes = True
@@ -65,6 +86,48 @@ class SendMessageRequest(BaseModel):
     phone_number: str
     text: str
 
+# --- Clinic Settings Endpoints ---
+
+@router.get("/portal/clinics/settings", response_model=ClinicSettingsResponse)
+async def get_clinic_settings(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if not current_user.clinic_id:
+        raise HTTPException(status_code=400, detail="Must belong to a clinic")
+        
+    result = await db.execute(select(Clinic).where(Clinic.id == current_user.clinic_id))
+    clinic = result.scalar_one_or_none()
+    if not clinic:
+        raise HTTPException(status_code=404, detail="Clinic not found")
+        
+    return clinic
+
+@router.put("/portal/clinics/settings", response_model=ClinicSettingsResponse)
+async def update_clinic_settings(
+    req: ClinicSettingsUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if not current_user.clinic_id:
+        raise HTTPException(status_code=400, detail="Must belong to a clinic")
+        
+    result = await db.execute(select(Clinic).where(Clinic.id == current_user.clinic_id))
+    clinic = result.scalar_one_or_none()
+    if not clinic:
+        raise HTTPException(status_code=404, detail="Clinic not found")
+        
+    if req.address is not None:
+        clinic.address = req.address
+    if req.working_hours is not None:
+        clinic.working_hours = req.working_hours
+    if req.general_info is not None:
+        clinic.general_info = req.general_info
+        
+    await db.commit()
+    await db.refresh(clinic)
+    return clinic
+
 # --- Doctor Endpoints ---
 
 @router.get("/portal/doctors", response_model=List[DoctorResponse])
@@ -92,7 +155,8 @@ async def create_doctor(
         name=req.name,
         specialty=req.specialty,
         email=req.email,
-        phone_number=req.phone_number
+        phone_number=req.phone_number,
+        bio=req.bio
     )
     db.add(doctor)
     await db.commit()
@@ -100,7 +164,7 @@ async def create_doctor(
     return doctor
 
 @router.put("/portal/doctors/{doctor_id}", response_model=DoctorResponse)
-async def update_doctor(doctor_id: int, req: DoctorCreate, db: AsyncSession = Depends(get_db)):
+async def update_doctor(doctor_id: int, req: DoctorCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(Doctor).where(Doctor.id == doctor_id))
     doctor = result.scalar_one_or_none()
     if not doctor:
@@ -110,13 +174,15 @@ async def update_doctor(doctor_id: int, req: DoctorCreate, db: AsyncSession = De
     doctor.specialty = req.specialty
     doctor.email = req.email
     doctor.phone_number = req.phone_number
+    if req.bio is not None:
+        doctor.bio = req.bio
     
     await db.commit()
     await db.refresh(doctor)
     return doctor
 
 @router.delete("/portal/doctors/{doctor_id}")
-async def delete_doctor(doctor_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_doctor(doctor_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(Doctor).where(Doctor.id == doctor_id))
     doctor = result.scalar_one_or_none()
     if not doctor:
@@ -241,7 +307,7 @@ async def create_timeslot(
     return slot
 
 @router.post("/portal/timeslots/block")
-async def block_timeslot(req: BlockTimeSlotRequest, db: AsyncSession = Depends(get_db)):
+async def block_timeslot(req: BlockTimeSlotRequest, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(TimeSlot).where(TimeSlot.id == req.timeslot_id))
     slot = result.scalar_one_or_none()
     if not slot:
@@ -460,6 +526,118 @@ async def save_contact_name(
         await db.refresh(new_patient)
         return {"success": True, "message": "Contact created", "patient_id": new_patient.id, "name": new_patient.name}
 
+# --- Media and Audio Endpoints ---
+
+from fastapi.responses import FileResponse
+import os
+
+@router.get("/portal/media/{message_id}")
+async def get_media(
+    message_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    save_dir = os.path.join(os.getcwd(), "uploads", "audio")
+    file_path = os.path.join(save_dir, f"{message_id}.ogg")
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Media not found")
+    return FileResponse(file_path, media_type="audio/ogg")
+
+from fastapi import UploadFile, File, Form
+from app.services.session_service import SessionService
+
+@router.post("/portal/send/audio")
+async def send_audio_from_portal(
+    phone_number: str = Form(...),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if not current_user.clinic_id:
+        raise HTTPException(status_code=400, detail="Clinic ID required")
+    
+    # 1. Set bot_paused to True for this patient
+    session = await SessionService.get_session(phone_number, current_user.clinic_id)
+    session["bot_paused"] = True
+    await SessionService.save_session(phone_number, session, current_user.clinic_id)
+    
+    # 2. Save the uploaded file locally
+    save_dir = os.path.join(os.getcwd(), "uploads", "audio", "outbound")
+    os.makedirs(save_dir, exist_ok=True)
+    import time
+    filename = f"out_{int(time.time())}.ogg"
+    file_path = os.path.join(save_dir, filename)
+    
+    with open(file_path, "wb") as f:
+        f.write(await file.read())
+        
+    # 3. Upload to Meta
+    ws_srv = WhatsAppService()
+    media_id = await ws_srv.upload_media(file_path, mime_type="audio/ogg")
+    
+    if not media_id:
+        raise HTTPException(status_code=500, detail="Failed to upload audio to WhatsApp servers")
+        
+    # 4. Send the audio message
+    res = await ws_srv.send_audio_message(phone_number, media_id)
+    
+    if res.get("status") == "error":
+        raise HTTPException(status_code=400, detail=str(res.get("error_data")))
+        
+    # 5. Save to database
+    db_msg = await MessageService.save_message(
+        db=db,
+        clinic_id=current_user.clinic_id,
+        sender="Me",
+        recipient=phone_number,
+        text="[🔊 Sent Audio Note]",
+        msg_type="audio",
+        whatsapp_message_id=None,
+        status="sent"
+    )
+    
+    # Broadcast to websocket
+    await manager.broadcast("message_received", {
+        "id": f"db_{db_msg.id}",
+        "sender": db_msg.sender,
+        "recipient": db_msg.recipient,
+        "text": db_msg.text,
+        "status": db_msg.status,
+        "timestamp": db_msg.timestamp.isoformat(),
+        "msg_type": "audio"
+    })
+    
+    return {"status": "success"}
+
+class ToggleBotRequest(BaseModel):
+    phone_number: str
+    bot_paused: bool
+
+@router.post("/portal/session/toggle-bot")
+async def toggle_bot(
+    req: ToggleBotRequest,
+    current_user: User = Depends(get_current_user)
+):
+    if not current_user.clinic_id:
+        raise HTTPException(status_code=400, detail="Clinic ID required")
+    
+    session = await SessionService.get_session(req.phone_number, current_user.clinic_id)
+    session["bot_paused"] = req.bot_paused
+    await SessionService.save_session(req.phone_number, session, current_user.clinic_id)
+    
+    return {"status": "success", "bot_paused": req.bot_paused}
+
+@router.get("/portal/session/{phone_number}/status")
+async def get_bot_status(
+    phone_number: str,
+    current_user: User = Depends(get_current_user)
+):
+    if not current_user.clinic_id:
+        raise HTTPException(status_code=400, detail="Clinic ID required")
+        
+    session = await SessionService.get_session(phone_number, current_user.clinic_id)
+    return {"status": "success", "bot_paused": session.get("bot_paused", False)}
+
+# --- WebSockets ---
 
 # --- Patient & Messaging Endpoints ---
 
@@ -545,7 +723,7 @@ async def resolve_nlp_log(log_id: int, db: AsyncSession = Depends(get_db), curre
     return {"message": "Log marked as resolved"}
 
 @router.get("/portal/patients/{patient_id}/history")
-async def get_patient_history(patient_id: int, db: AsyncSession = Depends(get_db)):
+async def get_patient_history(patient_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(Patient).where(Patient.id == patient_id))
     patient = result.scalar_one_or_none()
     if not patient:
@@ -603,10 +781,20 @@ async def send_portal_message(req: SendMessageRequest, db: AsyncSession = Depend
             )
         
     whatsapp_service = WhatsAppService()
-    result = await whatsapp_service.send_text_message(clean_number, text)
+    res = await whatsapp_service.send_text_message(req.phone_number, req.text)
     
-    if result.get("status") in ("sent", "logged_locally"):
-        api_resp = result.get("api_response", {})
+    if res.get("status") == "error":
+        raise HTTPException(status_code=400, detail=str(res.get("error_data")))
+        
+    # Auto-pause bot when a human sends a text
+    from app.services.session_service import SessionService
+    session = await SessionService.get_session(req.phone_number, current_user.clinic_id)
+    session["bot_paused"] = True
+    await SessionService.save_session(req.phone_number, session, current_user.clinic_id)
+
+    # Save to database
+    if res.get("status") in ("sent", "logged_locally"):
+        api_resp = res.get("api_response", {})
         msg_id = None
         if "messages" in api_resp and len(api_resp["messages"]) > 0:
             msg_id = api_resp["messages"][0].get("id")
@@ -649,11 +837,21 @@ async def send_portal_message(req: SendMessageRequest, db: AsyncSession = Depend
 # --- WebSocket Portal Gateway ---
 
 @router.websocket("/portal/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, token: str = None, db: AsyncSession = Depends(get_db)):
+    if not token:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
+        if not payload.get("sub"):
+            raise ValueError()
+    except Exception:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await manager.connect(websocket)
     try:
         while True:
-            # Keep connection alive; discard incoming text
             data = await websocket.receive_text()
             logger.info(f"Received text on portal WS: {data}")
     except WebSocketDisconnect:

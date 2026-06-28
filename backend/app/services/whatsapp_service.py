@@ -127,6 +127,104 @@ class WhatsAppService:
                 logger.error(f"Exception while retrieving media URL: {e}")
                 return "#"
 
+    async def download_media_file(self, media_url: str, save_path: str) -> bool:
+        """
+        Downloads the raw binary media from the Meta media URL and saves it to disk.
+        """
+        headers = {
+            "Authorization": f"Bearer {self.access_token}"
+        }
+        async with httpx.AsyncClient() as client:
+            try:
+                # Follow redirects if any, and stream the response
+                async with client.stream("GET", media_url, headers=headers, follow_redirects=True) as response:
+                    if response.status_code == 200:
+                        import os
+                        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                        with open(save_path, "wb") as f:
+                            async for chunk in response.aiter_bytes():
+                                f.write(chunk)
+                        return True
+                    else:
+                        logger.error(f"Failed to download media file ({response.status_code}): {response.text}")
+                        return False
+            except Exception as e:
+                logger.error(f"Exception while downloading media: {e}")
+                return False
+
+    async def upload_media(self, file_path: str, mime_type: str = "audio/ogg") -> str:
+        """
+        Uploads a media file to Meta and returns the media_id.
+        """
+        url = f"https://graph.facebook.com/v19.0/{self.phone_number_id}/media"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}"
+        }
+        import os
+        import aiofiles
+        
+        # Meta requires 'messaging_product' as a field in the form-data
+        data = {
+            "messaging_product": "whatsapp"
+        }
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                filename = os.path.basename(file_path)
+                with open(file_path, "rb") as f:
+                    files = {
+                        "file": (filename, f, mime_type)
+                    }
+                    response = await client.post(url, headers=headers, data=data, files=files)
+                
+                if response.status_code == 200:
+                    return response.json().get("id")
+                else:
+                    logger.error(f"Failed to upload media ({response.status_code}): {response.text}")
+                    return None
+            except Exception as e:
+                logger.error(f"Exception while uploading media: {e}")
+                return None
+
+    async def send_audio_message(self, recipient_id: str, media_id: str) -> Dict[str, Any]:
+        """
+        Sends an audio message (voice note) using a previously uploaded media_id.
+        """
+        if not self.access_token or not self.phone_number_id or self.access_token == "your_access_token_here":
+            logger.warning("WhatsApp API credentials are not configured. Logging audio message locally.")
+            return {
+                "status": "logged_locally",
+                "recipient_id": recipient_id,
+                "media_id": media_id
+            }
+
+        url = f"https://graph.facebook.com/v18.0/{self.phone_number_id}/messages"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": recipient_id,
+            "type": "audio",
+            "audio": {
+                "id": media_id
+            }
+        }
+
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(url, json=payload, headers=headers)
+                response_data = response.json()
+                if response.status_code >= 400:
+                    logger.error(f"WhatsApp API audio message error ({response.status_code}): {response_data}")
+                    return {"status": "error", "error_data": response_data}
+                return {"status": "sent", "api_response": response_data}
+            except Exception as e:
+                logger.error(f"Exception while sending audio message: {e}")
+                return {"status": "exception", "error": str(e)}
+
     async def send_interactive_buttons(self, recipient_id: str, text: str, buttons: list) -> Dict[str, Any]:
         """
         Sends an interactive message with up to 3 quick-reply buttons.

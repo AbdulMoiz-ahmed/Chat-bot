@@ -1,19 +1,17 @@
 import json
 import logging
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from app.core.config import settings
 
 logger = logging.getLogger("llm_extractor")
 
-# Initialize Gemini
-if settings.GEMINI_API_KEY:
-    genai.configure(api_key=settings.GEMINI_API_KEY)
-else:
+if not settings.GEMINI_API_KEY:
     logger.warning("GEMINI_API_KEY not configured in settings!")
 
 class LLMExtractor:
     @staticmethod
-    async def extract_intent(text: str) -> dict:
+    async def extract_intent(text: str = "", audio_path: str = None, clinic_context: dict = None) -> dict:
         """
         Sends the patient's free-text message to Gemini to extract intent AND generate
         a contextual natural-language response matching the patient's language (Urdu, Roman Urdu, Hindi, English, etc.).
@@ -30,8 +28,27 @@ class LLMExtractor:
         if not settings.GEMINI_API_KEY:
             raise ValueError("GEMINI_API_KEY is missing")
 
+        clinic_info = ""
+        if clinic_context:
+            doc_info = "\n".join([f"- Dr. {d['name']} ({d['specialty']}): {d['bio']}" for d in clinic_context.get("doctors", [])])
+            clinic_info = f"""
+Clinic Name: {clinic_context.get('name')}
+Clinic Address: {clinic_context.get('address')}
+Working Hours: {clinic_context.get('working_hours')}
+General Info: {clinic_context.get('general_info')}
+
+Available Doctors at this clinic:
+{doc_info}
+
+CRITICAL RULE: You MUST strictly use the above Clinic and Doctor information to answer patient queries. Do NOT invent, hallucinate, or guess addresses, names, hours, or any other facts not provided above.
+CRITICAL RULE 2: If the patient asks questions completely unrelated to healthcare, medicine, or this specific clinic (e.g., coding, politics, car repair, general knowledge trivia), you MUST politely decline to answer. State that you are a medical assistant for this clinic and pivot back to asking how you can help them with their healthcare needs.
+"""
+        else:
+            clinic_info = "You are a highly empathetic, professional medical clinic receptionist and virtual assistant."
+
         prompt = f"""
-You are a highly empathetic, professional medical clinic receptionist and virtual assistant.
+{clinic_info}
+
 Your job is to read incoming patient messages, detect their language and script (e.g., English, Roman Urdu, Urdu script, Hindi, Spanish, etc.), extract key intent fields, and write a natural conversational response in their EXACT same language/style.
 
 Always attempt to reply contextually and helpfully to the patient's actual message. NEVER output basic, robotic "I don't understand" responses if you can help it. If they want to book or inquire about an appointment, guide them smoothly.
@@ -65,12 +82,18 @@ Patient Message:
 """
         
         try:
-            # We use gemini-2.5-flash
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            # Set response_mime_type to application/json to enforce JSON output natively
-            response = model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
+            client = genai.Client(api_key=settings.GEMINI_API_KEY)
+            
+            contents = [prompt]
+            if audio_path:
+                logger.info(f"Uploading audio file to Gemini: {audio_path}")
+                audio_file = client.files.upload(file=audio_path)
+                contents.append(audio_file)
+            
+            response = client.models.generate_content(
+                model='gemini-2.0-flash',
+                contents=contents,
+                config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     temperature=0.3
                 )

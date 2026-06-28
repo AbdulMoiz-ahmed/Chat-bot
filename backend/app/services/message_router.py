@@ -8,8 +8,10 @@ from app.models.clinic import Clinic
 from app.handlers.text_handler import TextHandler
 from app.handlers.interactive_handler import InteractiveHandler
 from app.handlers.status_handler import StatusHandler
+from app.handlers.audio_handler import AudioHandler
 from app.services.whatsapp_service import WhatsAppService
 from app.services.message_service import MessageService
+from app.services.session_service import SessionService
 
 logger = logging.getLogger("message_router")
 logger.setLevel(logging.INFO)
@@ -69,21 +71,26 @@ class MessageRouter:
                     if contacts:
                         profile_name = contacts[0].get("profile", {}).get("name", "Patient")
 
+                    session = await SessionService.get_session(sender, clinic_id)
+                    bot_paused = session.get("bot_paused", False)
+
                     if msg_type == "text":
                         body = message.get("text", {}).get("body", "")
-                        await TextHandler.handle(message, db, body, profile_name, timestamp, clinic_id)
+                        await TextHandler.handle(message, db, body, profile_name, timestamp, clinic_id, bot_paused)
                     elif msg_type == "interactive":
-                        await InteractiveHandler.handle(message, db, profile_name, timestamp, clinic_id)
+                        await InteractiveHandler.handle(message, db, profile_name, timestamp, clinic_id, bot_paused)
+                    elif msg_type == "audio":
+                        import asyncio
+                        # Process audio in the background since it requires downloading
+                        asyncio.create_task(AudioHandler.handle(message, db, profile_name, timestamp, clinic_id, bot_paused))
                     else:
-                        # Handle media types and store them directly
+                        # Handle other media types and store them directly
                         body = ""
                         if msg_type == "image":
                             media_id = message.get("image", {}).get("id")
                             whatsapp_service = WhatsAppService()
                             media_url = await whatsapp_service.get_media_url(media_id)
                             body = f'<img src="{media_url}" alt="Image" class="chat-image" />'
-                        elif msg_type == "audio":
-                            body = "[🔊 Audio Received]"
                         elif msg_type == "video":
                             body = "[🎥 Video Received]"
                         elif msg_type == "document":

@@ -47,12 +47,51 @@ class BookingFlow:
             await cls._handle_reminder_action(phone, text_or_payload, db, clinic_id)
             return
 
-        if step == "idle" and msg_type == "text":
-            # Pass free text to LLM Intent Extractor
+        if step == "idle" and msg_type in ("text", "audio"):
+            import re
+            
+            # FAST-PATH LOCAL ROUTING (Fallback for Gemini)
+            if msg_type == "text":
+                if re.match(r'^(hi|hello|hey|salam|assalam.*|good morning|good evening)$', normalized_text):
+                    await cls._send_greeting_menu(phone, sender_name)
+                    return
+                if normalized_text in ("book", "appointment", "book appointment", "new appointment"):
+                    await cls._start_booking_flow(phone, db, clinic_id)
+                    return
+                if normalized_text in ("bookings", "manage", "my appointments"):
+                    await cls._start_manage_flow(phone, db, clinic_id)
+                    return
+                
+            # Pass free text or audio intent to LLM / Flow
             from app.services.llm_extractor import LLMExtractor
             from app.models.nlp_log import NlpLog
+            from app.models.clinic import Clinic
+            from app.models.doctor import Doctor
             try:
-                intent_data = await LLMExtractor.extract_intent(text_or_payload)
+                # Build clinic context
+                clinic_result = await db.execute(select(Clinic).where(Clinic.id == clinic_id))
+                clinic_obj = clinic_result.scalar_one_or_none()
+                doctor_result = await db.execute(select(Doctor).where(Doctor.clinic_id == clinic_id))
+                doctors_objs = doctor_result.scalars().all()
+                
+                clinic_context = None
+                if clinic_obj:
+                    clinic_context = {
+                        "name": clinic_obj.name,
+                        "address": clinic_obj.address or "Address not specified",
+                        "working_hours": clinic_obj.working_hours or "Hours not specified",
+                        "general_info": clinic_obj.general_info or "No additional info",
+                        "doctors": [
+                            {"name": d.name, "specialty": d.specialty, "bio": d.bio or "No bio"} 
+                            for d in doctors_objs
+                        ]
+                    }
+
+                if msg_type == "audio" and text_or_payload.startswith("__AUDIO_INTENT__:"):
+                    import json
+                    intent_data = json.loads(text_or_payload.replace("__AUDIO_INTENT__:", "", 1))
+                else:
+                    intent_data = await LLMExtractor.extract_intent(text_or_payload, clinic_context=clinic_context)
                 intent = intent_data.get("intent")
                 response_text = intent_data.get("conversational_response")
                 

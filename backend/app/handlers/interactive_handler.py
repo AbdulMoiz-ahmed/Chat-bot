@@ -18,7 +18,8 @@ class InteractiveHandler:
         db: AsyncSession,
         profile_name: str,
         timestamp: datetime = None,
-        clinic_id: int = None
+        clinic_id: int = None,
+        bot_paused: bool = False
     ):
         sender = message.get("from")
         message_id = message.get("id")
@@ -74,7 +75,7 @@ class InteractiveHandler:
             logger.error(f"Failed to send typing/read status: {ws_err}")
         
         # 2. Forward to state machine dialog manager
-        if payload_id:
+        if not bot_paused:
             from app.services.booking_flow import BookingFlow
             await BookingFlow.handle_message(
                 clinic_id=clinic_id,
@@ -84,3 +85,5 @@ class InteractiveHandler:
                 text_or_payload=payload_id,
                 db=db
             )
+        else:
+            logger.info(f"Bot is paused for {sender}. Skipping BookingFlow.")

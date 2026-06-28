@@ -20,7 +20,8 @@ class TextHandler:
         text_body: str,
         profile_name: str,
         timestamp: datetime = None,
-        clinic_id: int = None
+        clinic_id: int = None,
+        bot_paused: bool = False
     ):
         sender = message.get("from")
         message_id = message.get("id")
@@ -52,12 +53,15 @@ class TextHandler:
             logger.error(f"Failed to send typing/read status: {ws_err}")
         
         # 2. Forward to state machine dialog manager
-        from app.services.booking_flow import BookingFlow
-        await BookingFlow.handle_message(
-            clinic_id=clinic_id,
-            phone_number=sender,
-            sender_name=profile_name,
-            msg_type="text",
-            text_or_payload=text_body,
-            db=db
-        )
+        if not bot_paused:
+            from app.services.booking_flow import BookingFlow
+            await BookingFlow.handle_message(
+                clinic_id=clinic_id,
+                phone_number=sender,
+                sender_name=profile_name,
+                msg_type="text",
+                text_or_payload=text_body,
+                db=db
+            )
+        else:
+            logger.info(f"Bot is paused for {sender}. Skipping BookingFlow.")
